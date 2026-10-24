@@ -33,6 +33,15 @@ class TestIsOAuthToken:
         # token (#133856): classifying it as OAuth rides the Claude Code identity on it.
         assert _is_oauth_token("sk-ant-usr01-abcdef1234567890") is False
 
+    @pytest.mark.parametrize("key,expected", [
+        ("sk-ant-api03-synthetic", False), ("sk-ant-usr01-synthetic", False),
+        ("sk-ant-svc01-synthetic", False), ("sk-ant-admin01-synthetic", False),
+        ("sk-ant-oat01-synthetic", True), ("eyJhbGciOiJIUzI1NiJ9.synthetic", True),
+        ("cc-synthetic-access-token", True),
+    ])
+    def test_api_key_and_oauth_families(self, key, expected):
+        assert _is_oauth_token(key) is expected
+
 
 def test_missing_sdk_error_reports_why_the_lazy_install_did_not_land(monkeypatch):
     """A completed install that needs a restart must not tell the user to install it again."""
@@ -71,6 +80,31 @@ class TestBuildAnthropicClient:
             assert "context-1m-2025-08-07" not in betas
             assert "oauth-2025-04-20" not in betas  # OAuth-only beta NOT present
             assert "claude-code-20250219" not in betas  # OAuth-only beta NOT present
+
+    def test_user_scoped_api_key_uses_x_api_key_without_claude_code_identity(self):
+        # sk-ant-usr* sent as Bearer + Claude Code identity is billed as Claude Code traffic
+        # and rejected on promotional API credits ("credit balance too low").
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-ant-usr01-synthetic", base_url="https://api.anthropic.com")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            headers = kwargs["default_headers"]
+            assert kwargs["api_key"] == "sk-ant-usr01-synthetic"
+            assert "auth_token" not in kwargs
+            assert "oauth-2025-04-20" not in headers["anthropic-beta"]
+            assert "claude-code-20250219" not in headers["anthropic-beta"]
+            assert "x-app" not in headers
+            assert not str(headers.get("user-agent", "")).startswith("claude-code/")
+
+    def test_setup_token_keeps_bearer_and_claude_code_identity(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-ant-oat01-synthetic", base_url="https://api.anthropic.com")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            headers = kwargs["default_headers"]
+            assert kwargs["auth_token"] == "sk-ant-oat01-synthetic"
+            assert "api_key" not in kwargs
+            assert "oauth-2025-04-20" in headers["anthropic-beta"]
+            assert headers["x-app"] == "cli"
+            assert headers["user-agent"].startswith("claude-code/")
 
 
     def test_opencode_endpoint_gets_attribution_headers(self):
